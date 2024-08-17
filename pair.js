@@ -1,75 +1,119 @@
 const PastebinAPI = require('pastebin-js'),
 pastebin = new PastebinAPI('EMWTMkQAVfJa9kM-MRUrxd5Oku1U7pgL')
-const {makeid} = require('./id');
-const express = require('express');
-const fs = require('fs');
-let router = express.Router()
-const pino = require("pino");
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    delay,
-    makeCacheableSignalKeyStore
-} = require("@whiskeysockets/baileys");
+const {makeid} = require('./id')
+const id = makeid()
+const fs = require('fs')
+const pino = require('pino')
+const { default: makeWASocket, Browsers, delay, useMultiFileAuthState, BufferJSON, fetchLatestBaileysVersion, PHONENUMBER_MCC, DisconnectReason, makeInMemoryStore, jidNormalizedUser, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys")
+const Pino = require("pino")
+const NodeCache = require("node-cache")
+const chalk = require("chalk")
+const readline = require("readline")
+const { parsePhoneNumber } = require("libphonenumber-js")
 
-function removeFile(FilePath){
-    if(!fs.existsSync(FilePath)) return false;
-    fs.rmSync(FilePath, { recursive: true, force: true })
- };
-router.get('/', async (req, res) => {
-    const id = makeid();
-    let num = req.query.number;
-        async function getPaire() {
-        const {
-            state,
-            saveCreds
-        } = await useMultiFileAuthState('./temp/'+id)
-     try {
-            let session = makeWASocket({
-                auth: {
-                    creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, pino({level: "fatal"}).child({level: "fatal"})),
-                },
-                printQRInTerminal: false,
-                logger: pino({level: "fatal"}).child({level: "fatal"}),
-                browser: ["Chrome (Linux)","",""],
-             });
-             if(!session.authState.creds.registered) {
-                await delay(1500);
-                        num = num.replace(/[^0-9]/g,'');
-                            const code = await session.requestPairingCode(num)
-                 if(!res.headersSent){
-                 await res.send({code});
-                     }
-                 }
-            session.ev.on('creds.update', saveCreds)
-            session.ev.on("connection.update", async (s) => {
-                const {
-                    connection,
-                    lastDisconnect
-                } = s;
-                if (connection == "open") {
-                await delay(10000);
-                    const output = await pastebin.createPasteFromFile(__dirname+`/temp/${id}/creds.json`, "pastebin-js test", null, 1, "N");
-					await session.sendMessage(session.user.id, {
-						text: output.split('/')[3]
-					})
-        await delay(100);
-        await session.ws.close();
-        return await removeFile('./temp/'+id);
-            } else if (connection === "close" && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {
-                    await delay(10000);
-                    getPaire();
-                }
-            });
-        } catch (err) {
-            console.log("service restated");
-            await removeFile('./temp/'+id);
-         if(!res.headersSent){
-            await res.send({code:"Service Unavailable"});
+
+let phoneNumber = "94711262551"
+
+const pairingCode = !!phoneNumber || process.argv.includes("--pairing-code")
+const useMobile = process.argv.includes("--mobile")
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+const question = (text) => new Promise((resolve) => rl.question(text, resolve))
+
+
+  async function qr() {
+//------------------------------------------------------
+let { version, isLatest } = await fetchLatestBaileysVersion()
+const {  state, saveCreds } =await useMultiFileAuthState('./session/'+id)
+    const msgRetryCounterCache = new NodeCache()
+    const sock = makeWASocket({
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: !pairingCode,
+      browser: Browsers.macOS('safari'), // for this issues https://github.com/WhiskeySockets/Baileys/issues/328
+     auth: {
+         creds: state.creds,
+         keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: "fatal" }).child({ level: "fatal" })),
+      },
+      markOnlineOnConnect: true, // set false for offline
+      generateHighQualityLinkPreview: true, // make high preview link
+      getMessage: async (key) => {
+         let jid = jidNormalizedUser(key.remoteJid)
+         let msg = await store.loadMessage(jid, key.id)
+
+         return msg?.message || ""
+      },
+      msgRetryCounterCache, // Resolve waiting messages
+      defaultQueryTimeoutMs: undefined, // for this issues https://github.com/WhiskeySockets/Baileys/issues/276
+   })
+
+
+   if (pairingCode && !sock.authState.creds.registered) {
+      if (useMobile) throw new Error('Cannot use pairing code with mobile api')
+
+      let phoneNumber
+      if (!!phoneNumber) {
+         phoneNumber = phoneNumber.replace(/[^0-9]/g, '')
+
+         if (!Object.keys(PHONENUMBER_MCC).some(v => phoneNumber.startsWith(v))) {
+            console.log(chalk.bgBlack(chalk.redBright("Start with country code of your WhatsApp Number, Example :+")))
+            process.exit(0)
          }
-        }
+      } else {
+         phoneNumber = await question(chalk.bgBlack(chalk.greenBright(`Please type your WhatsApp number \nFor example: +94711262551 : `)))
+         phoneNumber = phoneNumber.replace(/[^0-9]/g, '')
+
+         // Ask again when entering the wrong number
+         if (!Object.keys(PHONENUMBER_MCC).some(v => phoneNumber.startsWith(v))) {
+            console.log(chalk.bgBlack(chalk.redBright("Start with country code of your WhatsApp Number, Example : +94711262551")))
+
+            phoneNumber = await question(chalk.bgBlack(chalk.greenBright(`Please type your WhatsApp number \nFor example: +94711262551 : `)))
+            phoneNumber = phoneNumber.replace(/[^0-9]/g, '')
+            rl.close()
+         }
+      }
+
+      setTimeout(async () => {
+         let code = await sock.requestPairingCode(phoneNumber)
+         code = code?.match(/.{1,4}/g)?.join("-") || code
+         console.log(chalk.black(chalk.bgGreen(`Your Pairing Code : `)), chalk.black(chalk.white(code)))
+      }, 3000)
+   }
+//------------------------------------------------------
+    sock.ev.on("connection.update", async (s) => {
+    const { connection, lastDisconnect } = s;
+    if (connection == "open") {
+      await delay(1000 * 10);
+      const output = await pastebin.createPasteFromFile(__dirname+`/session/${id}/creds.json`, "pastebin-js test", null, 1, "N")
+      const ethix = await sock.sendMessage(sock.user.id, {
+        text: `Imalka-MD&` + output.split('/')[3]
+      })
+      sock.groupAcceptInvite("CPUDKTYNb6Y9zENvySnBZC");
+      await sock.sendMessage(sock.user.id, { text: `> ⚠️ DO NOT SHARE THIS SESSION-ID WITH ANYBODY ❌` }, { quoted: hansamal });
+      await delay(1000 * 2);
+      process.exit(0);
     }
-    return await getPaire()
-});
-module.exports = router
+        if (
+            connection === "close" &&
+            lastDisconnect &&
+            lastDisconnect.error &&
+            lastDisconnect.error.output.statusCode != 401
+        ) {
+            qr()
+        }
+    })
+    sock.ev.on('creds.update', saveCreds)
+    sock.ev.on("messages.upsert",  () => { })
+}
+qr()
+
+process.on('uncaughtException', function (err) {
+let e = String(err)
+if (e.includes("conflict")) return
+if (e.includes("not-authorized")) return
+if (e.includes("Socket connection timeout")) return
+if (e.includes("rate-overlimit")) return
+if (e.includes("Connection Closed")) return
+if (e.includes("Timed Out")) return
+if (e.includes("Value not found")) return
+console.log('Caught exception: ', err)
+})
